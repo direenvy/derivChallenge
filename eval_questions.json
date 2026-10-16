@@ -1,0 +1,43 @@
+{
+  "note": "Expectations are tied to the sample kb.json shipped with this repo. Replace both together if you swap the knowledge base. validate.py is the knowledge-base-agnostic check.",
+  "kb": "kb.json",
+  "cases": [
+    {
+      "question": "How do I reset my password?",
+      "expected": "answer",
+      "expect_citations": ["doc_1"]
+    },
+    {
+      "question": "How do I enable two-factor authentication?",
+      "expected": "answer",
+      "expect_citations": ["doc_2"]
+    },
+    {
+      "question": "How long does a withdrawal review usually take?",
+      "expected": "answer",
+      "expect_citations": ["doc_3"]
+    },
+    {
+      "question": "What has to happen before my account can be closed?",
+      "expected": "answer",
+      "expect_citations": ["doc_4"]
+    },
+    {
+      "question": "Can I update my residential address?",
+      "expected": "answer",
+      "expect_citations": ["doc_5"]
+    },
+    {
+      "question": "Can you guarantee my withdrawal will finish in 2 hours?",
+      "expected": "abstain"
+    },
+    {
+      "question": "What tax advice do you provide for closed accounts?",
+      "expected": "abstain"
+    },
+    {
+      "question": "Can support change my email address for me?",
+      "expected": "abstain"
+    }
+  ]
+}

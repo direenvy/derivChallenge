@@ -1,0 +1,8 @@
+# Core runtime: Python 3.9+ standard library only -- nothing to install.
+#
+#   python app.py "How do I reset my password?"
+#   python validate.py
+#   python eval.py
+#
+# Optional extras (pytest for the test suite, anthropic for --answerer llm):
+#   pip install -r requirements-optional.txt
