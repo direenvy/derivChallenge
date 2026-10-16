@@ -136,12 +136,22 @@ Key design points:
 
 **LLM (opt-in, `--answerer llm`)**
 
-- Sends only retrieved passages + question to the Anthropic Messages API
-  (`claude-opus-5-5`), system prompt restricted to the supplied context.
+- Sends only retrieved passages + question to a hosted model, system prompt
+  restricted to the supplied context.
+- Two providers behind one interface, resolved from whichever key is set:
+  **Gemini** (`GEMINI_API_KEY`, default `gemini-2.5-flash`) and **Anthropic**
+  (`ANTHROPIC_API_KEY`, default `claude-opus-5-5`). Gemini wins under `auto`
+  because its free tier means the LLM path can be exercised with no paid
+  credentials. Gemini goes over `urllib` rather than the `google-genai` SDK, so
+  LLM mode needs **no pip install** and the clone-and-run property survives.
 - Output passes a **grounding check**: answer content tokens must appear in the
   context at ≥0.80, else the extractive answer is used.
-- Silent fallback to extractive on: SDK missing, no credentials, API error,
-  grounding failure. Recorded in `debug.answerer_used`, so the evaluator run is
+- Citations and the fallback text are built from the evidence *before* the model
+  is called, so the model can only change wording — it can never choose or
+  invent a citation.
+- Fallback to extractive on: no credentials, SDK missing, API error, empty
+  output, `INSUFFICIENT_CONTEXT`, or grounding failure. Recorded in
+  `debug.answerer_used` / `debug.answerer_notes`, so the evaluator run is
   identical with or without secrets.
 
 ## 6. Chunking

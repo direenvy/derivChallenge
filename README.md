@@ -159,19 +159,52 @@ is swappable:
 | Mode | Behaviour |
 |------|-----------|
 | `rule` (default) | **Extractive.** The answer is verbatim sentences selected from the retrieved passages, so it cannot hallucinate by construction. |
-| `llm` | Sends **only** the retrieved passages plus the question to the Anthropic Messages API (`claude-opus-5-5`), then runs a grounding check (answer content terms must occur in the context at ≥0.80) and falls back to extractive if it fails. |
-| `auto` | `llm` when usable, otherwise `rule`. |
+| `llm` | Sends **only** the retrieved passages plus the question to a hosted model, then runs a grounding check (answer content terms must occur in the context at ≥0.80) and falls back to extractive if it fails. |
+| `auto` | `llm` when a key is present, otherwise `rule`. |
+
+Two providers are supported, picked automatically from whichever key is set
+(Gemini first, since its free tier means the LLM path can be run without
+paid credentials):
+
+| Provider | Key | Default model | Install |
+|----------|-----|---------------|---------|
+| Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `gemini-2.5-flash` | none — plain `urllib` REST call |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | `pip install anthropic` |
 
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-...
+# PowerShell
+$env:GEMINI_API_KEY = "..."
 python app.py --answerer llm "How long does a withdrawal review take?"
 ```
 
-Without the SDK or a key, `--answerer llm` still runs: it falls back to the
-extractive answer and records why in `debug.answerer_notes`. The LLM never
-widens retrieval and never sees documents outside the retrieved set, so the
-grounding guarantee is the same in both modes.
+```bash
+# bash
+export GEMINI_API_KEY=...
+python app.py --answerer llm --llm-provider gemini "How long does a withdrawal review take?"
+```
+
+Override the model with `--llm-model` (or `GEMINI_MODEL` / `ANTHROPIC_MODEL`).
+`--llm-provider gemini|anthropic` forces one; naming a provider with no key is
+an error rather than a silent switch, so a misconfigured run is visible.
+
+Verified live against Gemini `gemini-2.5-flash`: `debug.answerer_used` reports
+`llm:gemini` with `llm_grounding_ratio: 1.0`, and the answer tightens to
+*"Withdrawals usually complete within 24 hours. Reviews can take longer on
+weekends or holidays."* — shorter than the extractive version, same facts.
+Free-tier quota (HTTP 429) was also exercised: it falls back to the extractive
+answer and records the error, so a quota-limited key degrades instead of
+failing.
+
+Keys can also go in a local `.env` (gitignored, see `.env.example`); real
+environment variables always win over it.
+
+**The LLM layer is strictly optional.** With no key, no SDK, an API error, or a
+failed grounding check, `--answerer llm` still returns an answer: it falls back
+to the extractive composer and records why in `debug.answerer_notes`, with
+`debug.answerer_used` showing `rule` instead of `llm:gemini`. The model never
+widens retrieval, never sees documents outside the retrieved set, and never
+supplies the citations — those come from the retrieved evidence either way — so
+the grounding guarantee is identical in both modes.
 
 ## Chunking
 

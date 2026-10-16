@@ -14,7 +14,13 @@ import json
 import sys
 from typing import List, Optional
 
-from support_answer.config import ANSWERER_MODES, DEFAULT_KB_PATH, Settings
+from support_answer.config import (
+    ANSWERER_MODES,
+    DEFAULT_KB_PATH,
+    LLM_PROVIDERS,
+    Settings,
+    load_env_file,
+)
 from support_answer.kb import KbError
 from support_answer.pipeline import SupportAnswerService
 
@@ -35,6 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(ANSWERER_MODES),
         help="answer composition layer (default: rule, no API key needed)",
     )
+    parser.add_argument(
+        "--llm-provider",
+        default="auto",
+        choices=list(LLM_PROVIDERS),
+        help="LLM provider for --answerer llm (default: auto, whichever key is set)",
+    )
+    parser.add_argument(
+        "--llm-model", default=None, help="override the provider's default model"
+    )
     parser.add_argument("--top-k", type=int, default=None, help="passages to retrieve")
     parser.add_argument(
         "--min-coverage", type=float, default=None, help="override gate G2 threshold"
@@ -52,8 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def settings_from_args(args: argparse.Namespace) -> Settings:
-    settings = Settings(answerer=args.answerer)
+    settings = Settings(answerer=args.answerer, llm_provider=args.llm_provider)
     overrides = {}
+    if args.llm_model:
+        overrides["llm_model"] = args.llm_model
     if args.top_k is not None:
         overrides["top_k"] = args.top_k
     if args.min_coverage is not None:
@@ -86,6 +103,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     question = read_question(args, parser)
+    load_env_file()  # optional local .env, for the LLM layer only
 
     try:
         service = SupportAnswerService.from_path(args.kb, settings_from_args(args))

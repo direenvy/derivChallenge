@@ -15,7 +15,13 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
-from support_answer.config import ANSWERER_MODES, DEFAULT_KB_PATH, Settings
+from support_answer.config import (
+    ANSWERER_MODES,
+    DEFAULT_KB_PATH,
+    LLM_PROVIDERS,
+    Settings,
+    load_env_file,
+)
 from support_answer.kb import KbError
 from support_answer.pipeline import SupportAnswerService
 
@@ -100,13 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--answerer", default="rule", choices=list(ANSWERER_MODES))
+    parser.add_argument("--llm-provider", default="auto", choices=list(LLM_PROVIDERS))
+    parser.add_argument("--llm-model", default="")
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    load_env_file()  # optional local .env, for the LLM layer only
     try:
-        service = SupportAnswerService.from_path(args.kb, Settings(answerer=args.answerer))
+        service = SupportAnswerService.from_path(
+            args.kb,
+            Settings(
+                answerer=args.answerer,
+                llm_provider=args.llm_provider,
+                llm_model=args.llm_model,
+            ),
+        )
     except KbError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

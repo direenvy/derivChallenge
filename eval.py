@@ -15,7 +15,13 @@ import json
 import sys
 from typing import Any, Dict, List, Optional
 
-from support_answer.config import ANSWERER_MODES, DEFAULT_KB_PATH, Settings
+from support_answer.config import (
+    ANSWERER_MODES,
+    DEFAULT_KB_PATH,
+    LLM_PROVIDERS,
+    Settings,
+    load_env_file,
+)
 from support_answer.kb import KbError
 from support_answer.pipeline import SupportAnswerService
 
@@ -36,11 +42,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--kb", default=DEFAULT_KB_PATH)
     parser.add_argument("--cases", default=DEFAULT_CASES)
     parser.add_argument("--answerer", default="rule", choices=list(ANSWERER_MODES))
+    parser.add_argument("--llm-provider", default="auto", choices=list(LLM_PROVIDERS))
     parser.add_argument("--verbose", action="store_true", help="print each answer in full")
     args = parser.parse_args(argv)
+    load_env_file()  # optional local .env, for the LLM layer only
 
     try:
-        service = SupportAnswerService.from_path(args.kb, Settings(answerer=args.answerer))
+        service = SupportAnswerService.from_path(
+            args.kb,
+            Settings(answerer=args.answerer, llm_provider=args.llm_provider),
+        )
     except KbError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

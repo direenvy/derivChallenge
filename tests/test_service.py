@@ -250,14 +250,88 @@ def test_rule_mode_needs_no_network_or_key(service, monkeypatch):
     assert response["debug"]["answerer_used"] == "rule"
 
 
+def _clear_llm_env(monkeypatch):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_llm_mode_falls_back_to_rule_without_credentials(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    _clear_llm_env(monkeypatch)
     svc = SupportAnswerService.from_path(KB_PATH, Settings(answerer="llm"))
     response = svc.ask("How do I reset my password?")
     assert response["decision"] == "answer"
     assert response["debug"]["answerer_used"] == "rule"
     assert any("llm_fallback" in note for note in response["debug"]["answerer_notes"])
+    assert response["citations"], "fallback must keep its citations"
+
+
+def test_provider_resolution_prefers_whichever_key_is_present(monkeypatch):
+    from support_answer.answer import LlmUnavailable, model_for, resolve_provider
+
+    _clear_llm_env(monkeypatch)
+    with pytest.raises(LlmUnavailable, match="no credentials"):
+        resolve_provider(Settings(llm_provider="auto"))
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    assert resolve_provider(Settings(llm_provider="auto")) == "gemini"
+    assert resolve_provider(Settings(llm_provider="gemini")) == "gemini"
+    # Naming a provider with no key is an error, not a silent switch.
+    with pytest.raises(LlmUnavailable, match="no credentials"):
+        resolve_provider(Settings(llm_provider="anthropic"))
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    assert resolve_provider(Settings(llm_provider="auto")) == "gemini"
+    assert resolve_provider(Settings(llm_provider="anthropic")) == "anthropic"
+
+    with pytest.raises(LlmUnavailable, match="unknown llm provider"):
+        resolve_provider(Settings(llm_provider="llama"))
+
+    assert model_for("gemini", Settings()) == "gemini-2.5-flash"
+    assert model_for("gemini", Settings(llm_model="gemini-3-pro")) == "gemini-3-pro"
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.0-flash")
+    assert model_for("gemini", Settings()) == "gemini-2.0-flash"
+
+
+def test_llm_answer_is_rejected_when_not_grounded(monkeypatch):
+    """A model answer containing outside facts must be replaced, not returned."""
+    import support_answer.answer as answer_module
+
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setitem(
+        answer_module.COMPOSERS,
+        "gemini",
+        lambda evidence, settings: (
+            "Your refund will arrive by helicopter within eleven minutes, "
+            "guaranteed by our Luxembourg tax counsel."
+        ),
+    )
+    svc = SupportAnswerService.from_path(KB_PATH, Settings(answerer="llm"))
+    response = svc.ask("How do I reset my password?")
+    assert response["debug"]["answerer_used"] == "rule"
+    assert "helicopter" not in response["answer"]
+    assert any("grounding ratio below" in n for n in response["debug"]["answerer_notes"])
+
+
+def test_llm_answer_is_kept_when_grounded(monkeypatch):
+    import support_answer.answer as answer_module
+
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setitem(
+        answer_module.COMPOSERS,
+        "gemini",
+        lambda evidence, settings: (
+            "Reset your password from the login page using Forgot password; "
+            "the reset link is sent to your registered email address."
+        ),
+    )
+    svc = SupportAnswerService.from_path(KB_PATH, Settings(answerer="llm"))
+    response = svc.ask("How do I reset my password?")
+    assert response["debug"]["answerer_used"] == "llm:gemini"
+    assert "Forgot password" in response["answer"]
+    assert response["citations"][0]["id"] == "doc_1"
+    assert not validate_response(response)
 
 
 # ------------------------------------------------------------------ text

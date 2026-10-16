@@ -4,21 +4,23 @@ Two interchangeable composers share one interface:
 
 * ``rule``  -- extractive. The answer is verbatim sentences from the retrieved
   passages, so it is grounded by construction.
-* ``llm``   -- an Anthropic model rewrites the retrieved passages, then a
-  grounding check verifies the result against those same passages. Any
-  failure (no SDK, no credentials, API error, failed check) falls back to the
-  extractive answer.
+* ``llm``   -- a hosted model (Gemini or Anthropic, whichever has a key)
+  rewrites the retrieved passages, then a grounding check verifies the result
+  against those same passages. Any failure (no credentials, no SDK, API error,
+  failed check) falls back to the extractive answer, so the evaluator can run
+  every path without secrets.
 
 This module imports neither ``kb`` nor ``retrieval``: it can only see the
 :class:`~support_answer.support.Evidence` handed to it, which is what makes
 "retrieval before generation" a structural guarantee rather than a convention.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
-from .config import Settings
+from .config import DEFAULT_MODELS, PROVIDER_ENV_KEYS, Settings
 from .support import Evidence, EvidenceSentence
 from .text import content_terms, truncate
 
@@ -152,51 +154,157 @@ def grounding_ratio(answer: str, context: str) -> float:
     return len(answer_terms & context_terms) / len(answer_terms)
 
 
-def compose_llm(evidence: Evidence, settings: Settings) -> str:
-    """Compose via the Anthropic Messages API, using only the retrieved context.
+def resolve_provider(settings: Settings) -> str:
+    """Pick the LLM provider to use, or explain why none can be used.
 
-    Raises :class:`LlmUnavailable` for every failure path so the caller can
-    fall back to the extractive answer.
+    ``auto`` prefers whichever provider has credentials present, Gemini first:
+    its free tier makes it the usable default for an evaluator with no
+    Anthropic key. An explicitly named provider without credentials is an
+    error rather than a silent switch, so a misconfigured run stays visible.
     """
-    try:
-        import anthropic  # noqa: PLC0415  (optional dependency, imported lazily)
-    except ImportError as exc:  # pragma: no cover - depends on environment
-        raise LlmUnavailable("anthropic SDK is not installed") from exc
+    requested = (settings.llm_provider or "auto").lower()
+    if requested not in ("auto",) + tuple(PROVIDER_ENV_KEYS):
+        raise LlmUnavailable(f"unknown llm provider {requested!r}")
 
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        raise LlmUnavailable("no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN in environment")
+    candidates = ("gemini", "anthropic") if requested == "auto" else (requested,)
+    for provider in candidates:
+        if any(os.environ.get(name) for name in PROVIDER_ENV_KEYS[provider]):
+            return provider
+    wanted = " or ".join("/".join(PROVIDER_ENV_KEYS[p]) for p in candidates)
+    raise LlmUnavailable(f"no credentials in environment (looked for {wanted})")
 
-    prompt = (
+
+def provider_credential(provider: str) -> str:
+    for name in PROVIDER_ENV_KEYS[provider]:
+        value = os.environ.get(name)
+        if value:
+            return value
+    raise LlmUnavailable(f"no credentials for provider {provider!r}")
+
+
+def model_for(provider: str, settings: Settings) -> str:
+    """Explicit setting, else the provider env override, else the default."""
+    if settings.llm_model:
+        return settings.llm_model
+    env_name = "GEMINI_MODEL" if provider == "gemini" else "ANTHROPIC_MODEL"
+    return os.environ.get(env_name) or DEFAULT_MODELS[provider]
+
+
+def build_prompt(evidence: Evidence) -> str:
+    return (
         f"CONTEXT:\n{evidence.context_text}\n\n"
         f"QUESTION: {evidence.question}\n\n"
         "Answer using only the CONTEXT above."
     )
+
+
+def compose_gemini(evidence: Evidence, settings: Settings) -> str:
+    """Compose via the Gemini REST API, using only the retrieved context.
+
+    Uses ``urllib`` rather than the ``google-genai`` SDK so LLM mode needs no
+    pip install: the project keeps its clone-and-run property whichever
+    answering layer is selected.
+    """
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    key = provider_credential("gemini")
+    model = model_for("gemini", settings)
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    body = json.dumps(
+        {
+            "system_instruction": {"parts": [{"text": LLM_SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": build_prompt(evidence)}]}],
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": settings.llm_max_tokens,
+            },
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"content-type": "application/json", "x-goog-api-key": key},
+        method="POST",
+    )
     try:
-        client = anthropic.Anthropic()
+        with urllib.request.urlopen(request, timeout=settings.llm_timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:  # pragma: no cover - network dependent
+        detail = " ".join(exc.read().decode("utf-8", "replace").split())[:500]
+        raise LlmUnavailable(f"gemini HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:  # pragma: no cover - network dependent
+        raise LlmUnavailable(f"gemini call failed: {type(exc).__name__}: {exc}") from exc
+
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        blocked = payload.get("promptFeedback", {}).get("blockReason")
+        raise LlmUnavailable(f"gemini returned no candidates (blockReason={blocked})")
+    parts = candidates[0].get("content", {}).get("parts") or []
+    return "".join(part.get("text", "") for part in parts).strip()
+
+
+def compose_anthropic(evidence: Evidence, settings: Settings) -> str:
+    """Compose via the Anthropic Messages API, using only the retrieved context."""
+    try:
+        import anthropic  # noqa: PLC0415  (optional dependency, imported lazily)
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise LlmUnavailable(
+            "anthropic SDK is not installed (pip install anthropic)"
+        ) from exc
+
+    provider_credential("anthropic")
+    try:
+        client = anthropic.Anthropic(timeout=settings.llm_timeout)
         response = client.messages.create(
-            model=settings.llm_model,
+            model=model_for("anthropic", settings),
             max_tokens=settings.llm_max_tokens,
             system=LLM_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": build_prompt(evidence)}],
         )
-        text = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
+        return "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", "") == "text"
         ).strip()
+    except LlmUnavailable:
+        raise
     except Exception as exc:  # pragma: no cover - network/credential dependent
-        raise LlmUnavailable(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
+        raise LlmUnavailable(
+            f"anthropic call failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
+
+COMPOSERS = {"gemini": compose_gemini, "anthropic": compose_anthropic}
+
+
+def compose_llm(evidence: Evidence, settings: Settings) -> Tuple[str, str]:
+    """Compose with the resolved provider. Returns ``(text, provider)``.
+
+    Raises :class:`LlmUnavailable` on every failure path -- missing
+    credentials, missing SDK, API error, empty output, or the model reporting
+    that the context is insufficient -- so the caller can always fall back to
+    the extractive answer.
+    """
+    provider = resolve_provider(settings)
+    text = COMPOSERS[provider](evidence, settings)
     if not text:
-        raise LlmUnavailable("LLM returned an empty answer")
+        raise LlmUnavailable(f"{provider} returned an empty answer")
     if "INSUFFICIENT_CONTEXT" in text:
-        raise LlmUnavailable("LLM reported insufficient context")
-    return text
+        raise LlmUnavailable(f"{provider} reported insufficient context")
+    return text, provider
 
 
 def compose(evidence: Evidence, settings: Settings) -> AnswerResult:
     """Compose the answer with the configured answering layer.
 
     ``rule`` is used directly; ``llm`` and ``auto`` try the model first and
-    degrade to the extractive answer, recording why in ``notes``.
+    degrade to the extractive answer, recording why in ``notes``. Citations
+    and the fallback text are built from the retrieved evidence before the
+    model is called, so the LLM can only ever change the wording.
     """
     sentences = select_supporting_sentences(evidence, settings)
     citations = build_citations(sentences, settings)
@@ -207,7 +315,7 @@ def compose(evidence: Evidence, settings: Settings) -> AnswerResult:
 
     notes: List[str] = []
     try:
-        text = compose_llm(evidence, settings)
+        text, provider = compose_llm(evidence, settings)
     except LlmUnavailable as exc:
         notes.append(f"llm_fallback: {exc}")
         return AnswerResult(
@@ -215,12 +323,14 @@ def compose(evidence: Evidence, settings: Settings) -> AnswerResult:
         )
 
     ratio = grounding_ratio(text, evidence.context_text)
+    notes.append(f"llm_provider: {provider}")
+    notes.append(f"llm_model: {model_for(provider, settings)}")
     notes.append(f"llm_grounding_ratio: {round(ratio, 3)}")
     if ratio < settings.llm_grounding_min:
-        notes.append(
-            f"llm_fallback: grounding ratio below {settings.llm_grounding_min}"
-        )
+        notes.append(f"llm_fallback: grounding ratio below {settings.llm_grounding_min}")
         return AnswerResult(
             text=extractive, citations=citations, answerer_used="rule", notes=notes
         )
-    return AnswerResult(text=text, citations=citations, answerer_used="llm", notes=notes)
+    return AnswerResult(
+        text=text, citations=citations, answerer_used=f"llm:{provider}", notes=notes
+    )

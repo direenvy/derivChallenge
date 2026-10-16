@@ -1,4 +1,7 @@
 # Optional only. The core retrieval, support-check and abstention flow runs
 # without any of this, and without an API key.
 pytest>=7.0          # python -m pytest -q
-anthropic>=1.0.0     # python app.py --answerer llm  (needs ANTHROPIC_API_KEY)
+anthropic>=1.0.0     # --answerer llm --llm-provider anthropic (ANTHROPIC_API_KEY)
+#
+# The Gemini provider needs no package at all: it is a plain urllib REST call,
+# so `--answerer llm` works on a clean checkout with only GEMINI_API_KEY set.

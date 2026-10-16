@@ -125,8 +125,13 @@ Errors: malformed body or missing/blank `question` -> HTTP 400 with
 | Mode | Behaviour |
 |------|-----------|
 | `rule` (default) | Extractive composition: the answer is verbatim sentences selected from retrieved passages. Hallucination-free by construction. |
-| `llm` | Anthropic Messages API composes from the retrieved context only, then a grounding check verifies the output against that context. Failure, missing SDK, or missing credentials -> automatic fallback to `rule`. |
+| `llm` | A hosted model composes from the retrieved context only, then a grounding check verifies the output against that context. Failure, missing SDK, or missing credentials -> automatic fallback to `rule`. |
 | `auto` | Use `llm` if usable, else `rule`, silently. |
+
+Providers **[revised]**: `gemini` (`GEMINI_API_KEY`, no package required) and
+`anthropic` (`ANTHROPIC_API_KEY`, needs the SDK), selected by `--llm-provider`
+or auto-detected from the environment with Gemini preferred. Gemini was added
+after the first build so the LLM path is runnable on a free key.
 
 The LLM path never widens retrieval and never sees documents outside the
 retrieved set.
